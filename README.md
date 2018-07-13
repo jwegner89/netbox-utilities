@@ -11,3 +11,4 @@ Utilities for Netbox management
 * Remove-LogFiles.ps1 - simple script to cleanup synchronization log files older than 1 week
 * vCenter_Netbox_Log_Cleanup.xml - Windows scheduled task example for cleaning log files older than 1 week
 * vCenter_Netbox_Sync.xml - Windows scheduled task example for running the Sync-Netbox script nightly
+* netbox_inventory.py - Generate an Ansible inventory file from Netbox
