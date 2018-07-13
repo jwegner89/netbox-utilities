@@ -1,4 +1,4 @@
-#Requires -Version 5 -Modules VMware.PowerCLI
+#Requires -Version 5
 <#
 .SYNOPSIS
     Synchronize Netbox Virtual Machines from VMware vCenter.
@@ -12,7 +12,7 @@
     Netbox REST API token
 
 .NOTES
-    Version:        1.0
+    Version:        1.1
     Author:         Joe Wegner <joe at jwegner dot io>
     Creation Date:  2018-02-08
     Purpose/Change: Initial script development
@@ -20,12 +20,17 @@
 
     Note that this script relies heavily on the PersistentID field in vCenter, as that will uniquely identify the VM
     You will need to create a vcenter_persistent_id custom field on your VM object in Netbox for this to work properly
+
+    removed PowerCLI requires header due to loading error
+    #Requires -Version 5 -Modules VMware.PowerCLI
 #>
 
 #---------------------------------------------------------[Initialisations]--------------------------------------------------------
 
 #Set Error Action to Silently Continue
 #$ErrorActionPreference = "SilentlyContinue"
+# allow verbose messages to be recorded in transcript
+$VerbosePreference = "Continue"
 
 #----------------------------------------------------------[Declarations]----------------------------------------------------------
 
@@ -84,7 +89,7 @@ function Sync-Netbox {
                 Write-Verbose $Message
             }
         }
-        
+
         # Create mapping of vCenter OSFullName to Netbox platform IDs
         $NetboxPlatforms = @{}
         $URI = $URIBase + $PlatformsPath + "/?limit=0"
@@ -201,11 +206,36 @@ function Sync-Netbox {
                 # Lookup Netbox ID for platform
                 if ($Guest.OSFullName) {
                     $Platform = $Guest.OSFullName
-                    $PlatformID = $NetboxPlatforms[$Platform]
-                    if ($NetboxInfo.Platform) {
-                        if ($NetboxInfo.Platform.ID -ne $PlatformID) { $vCenterInfo["platform"] = $PlatformID }
+                    # check that this platform exists in Netbox
+                    if ($NetboxPlatforms.ContainsKey($Platform)) {
+                        $PlatformID = $NetboxPlatforms[$Platform]
+                        if ($NetboxInfo.Platform) {
+                            if ($NetboxInfo.Platform.ID -ne $PlatformID) { $vCenterInfo["platform"] = $PlatformID }
+                        } else {
+                            $vCenterInfo["platform"] = $PlatformID
+                        }
                     } else {
-                        $vCenterInfo["platform"] = $PlatformID
+                        # platform not present in Netbox, need to create it
+
+                        # strip out bad character for friendly URL name
+                        $Slug = $Platform.ToLower()
+                        $Slug = $Slug -Replace "\s","-"
+                        $Slug = $Slug -Replace "\.",""
+                        $Slug = $Slug -Replace "\(",""
+                        $Slug = $Slug -Replace "\)",""
+                        $Slug = $Slug -Replace "/",""
+                        Write-Verbose "Creating new platform:"
+                        $PlatformInfo = @{
+                            "name" = $Platform
+                            "slug" = $Slug
+                        }
+                        $PlatformJSON = ConvertTo-JSON $PlatformInfo
+                        Write-Verbose $PlatformJSON
+                        $URI = $URIBase + $PlatformsPath + "/"
+                        $Response = Invoke-RESTMethod -Method POST -Headers $Headers -ContentType "application/json" -Body $PlatormJSON -URI $URI
+                        ConvertTo-JSON $Response | Write-Verbose
+                        # add new id into platforms hashtable
+                        $NetboxPlatforms[$Response.Name] = $Response.ID
                     }
                 }
         
@@ -243,33 +273,36 @@ function Sync-Netbox {
                 if ($Guest.NICs) {
                     foreach ($NICInfo in $Guest.NICs) {
                         foreach ($NIC in $NICInfo) {
-                            # Process each IP in array
-                            $IPs = @()
-                            foreach ($IP in $NIC.IPAddress) {
-                                $vCenterIP = [IPAddress]$IP
-                                # Create temporary variable for IP
-                                $TempIP = "127.0.0.1/32"
-                                # Apply appropriate prefix for IP version
-                                $AddressType = $vCenterIP | Select-Object -Property AddressFamily
-                                if ([String]$AddressType -eq "@{AddressFamily=InterNetwork}") {
-                                    $TempIP = $IP + "/32"
-                                } elseif ([String]$AddressType -eq "@{AddressFamily=InterNetworkV6}") {
-                                    $TempIP = $IP + "/128"
-                                } else {
-                                    Write-Warning -Message [String]::Format("Address {0} is of type {1}, skipping...", $IP, $AddressType)
-                                    continue
+                            # Check that the device name exists
+                            if ($NIC.Device.Name) {
+                                # Process each IP in array
+                                $IPs = @()
+                                foreach ($IP in $NIC.IPAddress) {
+                                    $vCenterIP = [IPAddress]$IP
+                                    # Create temporary variable for IP
+                                    $TempIP = "127.0.0.1/32"
+                                    # Apply appropriate prefix for IP version
+                                    $AddressType = $vCenterIP | Select-Object -Property AddressFamily
+                                    if ([String]$AddressType -eq "@{AddressFamily=InterNetwork}") {
+                                        $TempIP = $IP + "/32"
+                                    } elseif ([String]$AddressType -eq "@{AddressFamily=InterNetworkV6}") {
+                                        $TempIP = $IP + "/128"
+                                    } else {
+                                        Write-Warning -Message [String]::Format("Address {0} is of type {1}, skipping...", $IP, $AddressType)
+                                        continue
+                                    }
+                                    $IPs += $TempIP
                                 }
-                                $IPs += $TempIP
+            
+                                $Interface = @{
+                                    "enabled" = $NIC.Connected
+                                    "addresses" = $IPs
+                                    "name" = $NIC.Device.Name
+                                    "mac_address" = $NIC.MACAddress
+                                    "virtual_machine" = $NetboxID
+                                }
+                                $vCenterNICs += $Interface
                             }
-        
-                            $Interface = @{
-                                "enabled" = $NIC.Connected
-                                "addresses" = $IPs
-                                "name" = $NIC.Device.Name
-                                "mac_address" = $NIC.MACAddress
-                                "virtual_machine" = $NetboxID
-                            }
-                            $vCenterNICs += $Interface
                         }
                     }
                 }
@@ -488,10 +521,19 @@ function Sync-Netbox {
 
 #-----------------------------------------------------------[Execution]------------------------------------------------------------
 
+# setup logging to file
+$Date = Get-Date -UFormat "%Y-%m-%d"
+$LogPath = "D:\logs\" + $Date + "_vcenter_netbox_sync.log"
+Start-Transcript -Path $LogPath
+# import the PowerCLI module
 Import-Module VMware.PowerCLI
-# Make sure that you are connected to the vCenter servers before running this
+# Make sure that you are connected to the vCenter servers before running this manually
 $Credential = Get-Credential
 Connect-VIServer -Server vcenter.example.com -Credential $Credential
+
+# If running as a scheduled task, ideally you can use a service account
+# that can login to both Windows and vCenter with the account's Kerberos ticket
+# In that case, you can remove the -Credential from the above Connect-VIServer call
 
 # create your own token at your Netbox instance, e.g. https://netbox.example.com/user/api-tokens/
 # You may need to assign addtional user permissions at https://netbox.example.com/admin/auth/user/
@@ -500,4 +542,4 @@ $Token = "insert-token-generated-above"
 Sync-Netbox -Token $Token
 # If you want to see REST responses, add the Verbose flag
 #Sync-Netbox -Verbose -Token $Token
-
+Stop-Transcript
