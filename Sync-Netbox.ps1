@@ -232,7 +232,7 @@ function Sync-Netbox {
                         $PlatformJSON = ConvertTo-JSON $PlatformInfo
                         Write-Verbose $PlatformJSON
                         $URI = $URIBase + $PlatformsPath + "/"
-                        $Response = Invoke-RESTMethod -Method POST -Headers $Headers -ContentType "application/json" -Body $PlatormJSON -URI $URI
+                        $Response = Invoke-RESTMethod -Method POST -Headers $Headers -ContentType "application/json" -Body $PlatformJSON -URI $URI
                         ConvertTo-JSON $Response | Write-Verbose
                         # add new id into platforms hashtable
                         $NetboxPlatforms[$Response.Name] = $Response.ID
